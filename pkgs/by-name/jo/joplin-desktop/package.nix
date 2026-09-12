@@ -13,7 +13,7 @@
   cairo,
   pixman,
   libsecret,
-  electron,
+  electron_42,
   xcbuild,
   buildPackages,
   callPackage,
@@ -44,10 +44,6 @@ stdenv.mkDerivation (finalAttrs: {
     postFetch = ''
       # there's a file with a weird name that causes a hash mismatch on darwin
       rm $out/packages/app-cli/tests/support/photo*
-
-      # Remove after upstream updates to Yarn 4.14
-      # https://github.com/laurent22/joplin/blob/dev/package.json#L103
-      sed -i '/__metadata/{n;s/version: 8$/version: 9/;}' $out/yarn.lock
     '';
     inherit (releaseData) hash;
   };
@@ -112,6 +108,10 @@ stdenv.mkDerivation (finalAttrs: {
     sed -i '/postinstall/d' package.json
     # Don't install onenote-converter subpackage deps
     sed -i '/onenote-converter/d' packages/{lib,app-desktop}/package.json
+    # yarnPath makes `yarn` delegate to the bundled release instead of the
+    # nixpkgs-provided offline-configured yarn-berry, and npmMinimalAgeGate
+    # needs network access; both break the sandboxed build.
+    sed -i '/^yarnPath:/d;/^npmMinimalAgeGate:/d' .yarnrc.yml
   '';
 
   buildPhase = ''
@@ -137,6 +137,19 @@ stdenv.mkDerivation (finalAttrs: {
       root \
       @joplin/app-desktop
 
+    # Prevent the "installElectron" gulp task (part of @joplin/app-desktop's
+    # "build" script, run below) from downloading electron over the network:
+    # pre-populate its install markers so it thinks the right version is
+    # already present, and point it at the nixpkgs-provided electron via
+    # ELECTRON_OVERRIDE_DIST_PATH.
+    mkdir -p packages/app-desktop/node_modules/electron/dist
+    jq -j .version packages/app-desktop/node_modules/electron/package.json \
+      > packages/app-desktop/node_modules/electron/dist/version
+    printf '%s' "${
+      if stdenv.hostPlatform.isDarwin then "Electron.app/Contents/MacOS/Electron" else "electron"
+    }" > packages/app-desktop/node_modules/electron/path.txt
+    export ELECTRON_OVERRIDE_DIST_PATH=${electron_42.dist}
+
     echo "building workspaces..."
     yarn workspaces foreach -vi \
       --topological-dev \
@@ -150,7 +163,7 @@ stdenv.mkDerivation (finalAttrs: {
       run tsc
 
     # electronDist needs to be modifiable on Darwin
-    cp -r ${electron.dist} electronDist
+    cp -r ${electron_42.dist} electronDist
     chmod -R u+w electronDist
     electronDist="$PWD/electronDist"
 
@@ -172,7 +185,7 @@ stdenv.mkDerivation (finalAttrs: {
     yarn run electron-builder \
       --dir \
       -c.electronDist="$electronDist" \
-      -c.electronVersion=${electron.version} \
+      -c.electronVersion=${electron_42.version} \
       -c.mac.identity=null
 
     runHook postBuild
@@ -252,6 +265,6 @@ stdenv.mkDerivation (finalAttrs: {
     maintainers = with lib.maintainers; [
       fugi
     ];
-    inherit (electron.meta) platforms;
+    inherit (electron_42.meta) platforms;
   };
 })
